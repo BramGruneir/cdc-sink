@@ -2,14 +2,14 @@ package main
 
 import (
 	"bufio"
-	"database/sql"
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 	"sync"
 
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx"
 )
 
 // Sinks holds a map of all known sinks.
@@ -28,7 +28,7 @@ func CreateSinks() *Sinks {
 
 // AddSink creates and adds a new sink to the sinks map.
 func (s *Sinks) AddSink(
-	db *sql.DB, originalTable string, resultDB string, resultTable string,
+	ctx context.Context, conn *pgx.Conn, originalTable string, resultDB string, resultTable string,
 ) error {
 	s.Lock()
 	defer s.Unlock()
@@ -37,7 +37,7 @@ func (s *Sinks) AddSink(
 	resultDBLower := strings.ToLower(resultDB)
 	resultTableLower := strings.ToLower(resultTable)
 
-	sink, err := CreateSink(db, originalTableLower, resultDBLower, resultTableLower)
+	sink, err := CreateSink(ctx, conn, originalTableLower, resultDBLower, resultTableLower)
 	if err != nil {
 		return err
 	}
@@ -67,7 +67,7 @@ func (s *Sinks) GetAllSinks() []*Sink {
 
 // HandleResolvedRequest parses and applies all the resolved upserts.
 func (s *Sinks) HandleResolvedRequest(
-	db *sql.DB, rURL resolvedURL, w http.ResponseWriter, r *http.Request,
+	ctx context.Context, conn *pgx.Conn, rURL resolvedURL, w http.ResponseWriter, r *http.Request,
 ) {
 	scanner := bufio.NewScanner(r.Body)
 	defer r.Body.Close()
@@ -83,16 +83,17 @@ func (s *Sinks) HandleResolvedRequest(
 		log.Printf("Current Resolved: %+v", next)
 
 		// Start the transation
-		tx, err := db.Begin()
+		tx, err := conn.Begin(ctx)
 		if err != nil {
 			log.Print(err)
 			fmt.Fprint(w, err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		defer tx.Rollback(ctx)
 
 		// Get the previous resolved
-		prev, err := getPreviousResolved(tx, rURL.endpoint)
+		prev, err := getPreviousResolved(ctx, tx, rURL.endpoint)
 		if err != nil {
 			log.Print(err)
 			fmt.Fprint(w, err)
@@ -105,7 +106,7 @@ func (s *Sinks) HandleResolvedRequest(
 		// Find all rows to update and upsert them.
 		allSinks := s.GetAllSinks()
 		for _, sink := range allSinks {
-			if err := sink.UpdateRows(tx, prev, next); err != nil {
+			if err := sink.UpdateRows(ctx, tx, prev, next); err != nil {
 				log.Print(err)
 				fmt.Fprint(w, err)
 				w.WriteHeader(http.StatusBadRequest)
@@ -114,7 +115,7 @@ func (s *Sinks) HandleResolvedRequest(
 		}
 
 		// Write the updated resolved.
-		if err := next.writeUpdated(tx); err != nil {
+		if err := next.writeUpdated(ctx, tx); err != nil {
 			log.Print(err)
 			fmt.Fprint(w, err)
 			w.WriteHeader(http.StatusBadRequest)
@@ -122,7 +123,7 @@ func (s *Sinks) HandleResolvedRequest(
 		}
 
 		// Needs Retry.
-		if err := tx.Commit(); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			log.Print(err)
 			fmt.Fprint(w, err)
 			w.WriteHeader(http.StatusBadRequest)

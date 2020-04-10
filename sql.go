@@ -1,45 +1,45 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"log"
 
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx"
 )
 
 // CreateSinkDB creates a new sink db if one does not exist yet and also adds
 // the resolved table.
-func CreateSinkDB(db *sql.DB) error {
+func CreateSinkDB(ctx context.Context, conn *pgx.Conn) error {
 	// Needs retry.
 	// TODO - Set the zone configs to be small here.
-	_, err := db.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", *sinkDB))
+	_, err := conn.Exec(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", *sinkDB))
 	if err != nil {
 		return err
 	}
 
-	return CreateResolvedTable(db)
+	return CreateResolvedTable(ctx, conn)
 }
 
 // DropSinkDB drops the sinkDB and all data in it.
-func DropSinkDB(db *sql.DB) error {
+func DropSinkDB(ctx context.Context, conn *pgx.Conn) error {
 	// Needs retry.
-	_, err := db.Exec(fmt.Sprintf(`DROP DATABASE IF EXISTS %s CASCADE`, *sinkDB))
+	_, err := conn.Exec(ctx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s CASCADE`, *sinkDB))
 	return err
 }
 
 const sqlTableExistsQuery = `SELECT table_name FROM [SHOW TABLES FROM %s] WHERE table_name = '%s'`
 
 // TableExists checks for the existence of a table.
-func TableExists(db *sql.DB, dbName string, tableName string) (bool, error) {
+func TableExists(
+	ctx context.Context, conn *pgx.Conn, dbName string, tableName string,
+) (bool, error) {
 	// Needs retry.
 	findTableSQL := fmt.Sprintf(sqlTableExistsQuery, dbName, tableName)
-	log.Printf(findTableSQL)
-	row := db.QueryRow(findTableSQL)
 	var tableFound string
-	err := row.Scan(&tableFound)
+	err := conn.QueryRow(ctx, findTableSQL).Scan(&tableFound)
 	switch err {
-	case sql.ErrNoRows:
+	case pgx.ErrNoRows:
 		return false, nil
 	case nil:
 		log.Printf("Found: %s", tableFound)
@@ -55,11 +55,13 @@ SELECT column_name FROM [SHOW INDEX FROM %s] WHERE index_name = 'primary' ORDER 
 
 // GetPrimaryKeyColumns returns the column names for the primary key index for
 // a table, in order.
-func GetPrimaryKeyColumns(db *sql.DB, tableFullName string) ([]string, error) {
+func GetPrimaryKeyColumns(
+	ctx context.Context, conn *pgx.Conn, tableFullName string,
+) ([]string, error) {
 	// Needs retry.
 	findKeyColumns := fmt.Sprintf(sqlGetPrimaryKeyColumnsQuery, tableFullName)
 	log.Printf(findKeyColumns)
-	rows, err := db.Query(findKeyColumns)
+	rows, err := conn.Query(ctx, findKeyColumns)
 	if err != nil {
 		return nil, err
 	}

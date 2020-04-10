@@ -1,10 +1,12 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"math"
 	"testing"
+
+	"github.com/jackc/pgx"
 )
 
 // These test require an insecure cockroach server is running on the default
@@ -13,17 +15,22 @@ import (
 // findAllRowsToUpdateDB is a wrapper around FindAllRowsToUpdate that handles
 // the transaction for testing.
 func findAllRowsToUpdateDB(
-	db *sql.DB, sinkTableFullName string, prev ResolvedLine, next ResolvedLine,
+	ctx context.Context,
+	conn *pgx.Conn,
+	sinkTableFullName string,
+	prev ResolvedLine,
+	next ResolvedLine,
 ) ([]Line, error) {
-	tx, err := db.Begin()
+	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
-	lines, err := FindAllRowsToUpdate(tx, sinkTableFullName, prev, next)
+	defer tx.Rollback(ctx)
+	lines, err := FindAllRowsToUpdate(ctx, tx, sinkTableFullName, prev, next)
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return lines, nil
@@ -125,27 +132,28 @@ func TestParseLine(t *testing.T) {
 
 func TestWriteToSinkTable(t *testing.T) {
 	// Create the test db
-	db, dbName, dbClose := getDB(t)
+	ctx := context.Background()
+	conn, dbName, dbClose := getDB(ctx, t)
 	defer dbClose()
 
-	createSinkDB(t, db)
-	defer dropSinkDB(t, db)
+	createSinkDB(ctx, t, conn)
+	defer dropSinkDB(ctx, t, conn)
 
 	// Create the table to import from
-	tableFrom := createTestSimpleTable(t, db, dbName)
+	tableFrom := createTestSimpleTable(ctx, t, conn, dbName)
 
 	// Create the table to receive into
-	tableTo := createTestSimpleTable(t, db, dbName)
+	tableTo := createTestSimpleTable(ctx, t, conn, dbName)
 
 	// Give the from table a few rows
-	tableFrom.populateTable(t, 10)
-	if count := tableFrom.getTableRowCount(t); count != 10 {
+	tableFrom.populateTable(ctx, t, 10)
+	if count := tableFrom.getTableRowCount(ctx, t); count != 10 {
 		t.Fatalf("Expected Rows 10, actual %d", count)
 	}
 
 	// Create the sinks and sink
 	sinks := CreateSinks()
-	if err := sinks.AddSink(db, tableFrom.name, tableTo.dbName, tableTo.name); err != nil {
+	if err := sinks.AddSink(ctx, conn, tableFrom.name, tableTo.dbName, tableTo.name); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,7 +163,7 @@ func TestWriteToSinkTable(t *testing.T) {
 	}
 
 	// Make sure there are no rows in the table yet.
-	if rowCount := getRowCount(t, db, sink.sinkTableFullName); rowCount != 0 {
+	if rowCount := getRowCount(ctx, t, conn, sink.sinkTableFullName); rowCount != 0 {
 		t.Fatalf("Expected 0 rows, got %d", rowCount)
 	}
 
@@ -167,33 +175,34 @@ func TestWriteToSinkTable(t *testing.T) {
 			key:     fmt.Sprintf("[%d]", i),
 			after:   fmt.Sprintf(`{"a": %d`, i),
 		}
-		line.WriteToSinkTable(db, sink.sinkTableFullName)
+		line.WriteToSinkTable(ctx, conn, sink.sinkTableFullName)
 	}
 
 	// Check to see if there are indeed 100 rows in the table.
-	if rowCount := getRowCount(t, db, sink.sinkTableFullName); rowCount != 100 {
+	if rowCount := getRowCount(ctx, t, conn, sink.sinkTableFullName); rowCount != 100 {
 		t.Fatalf("Expected 0 rows, got %d", rowCount)
 	}
 }
 
 func TestFindAllRowsToUpdate(t *testing.T) {
 	// Create the test db
-	db, dbName, dbClose := getDB(t)
+	ctx := context.Background()
+	conn, dbName, dbClose := getDB(ctx, t)
 	defer dbClose()
 
 	// Create a new _cdc_sink db
-	createSinkDB(t, db)
-	defer dropSinkDB(t, db)
+	createSinkDB(ctx, t, conn)
+	defer dropSinkDB(ctx, t, conn)
 
 	// Create the table to import from
-	tableFrom := createTestSimpleTable(t, db, dbName)
+	tableFrom := createTestSimpleTable(ctx, t, conn, dbName)
 
 	// Create the table to receive into
-	tableTo := createTestSimpleTable(t, db, dbName)
+	tableTo := createTestSimpleTable(ctx, t, conn, dbName)
 
 	// Create the sinks and sink
 	sinks := CreateSinks()
-	if err := sinks.AddSink(db, tableFrom.name, tableTo.dbName, tableTo.name); err != nil {
+	if err := sinks.AddSink(ctx, conn, tableFrom.name, tableTo.dbName, tableTo.name); err != nil {
 		t.Fatal(err)
 	}
 
@@ -207,7 +216,7 @@ func TestFindAllRowsToUpdate(t *testing.T) {
 				after:   fmt.Sprintf("{a=%d,b=%d}", i, j),
 				key:     fmt.Sprintf("[%d]", i),
 			}
-			if err := line.WriteToSinkTable(db, sink.sinkTableFullName); err != nil {
+			if err := line.WriteToSinkTable(ctx, conn, sink.sinkTableFullName); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -225,7 +234,7 @@ func TestFindAllRowsToUpdate(t *testing.T) {
 			nanos:    int64(i),
 			logical:  i,
 		}
-		lines, err := findAllRowsToUpdateDB(db, sink.sinkTableFullName, prev, next)
+		lines, err := findAllRowsToUpdateDB(ctx, conn, sink.sinkTableFullName, prev, next)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -246,7 +255,7 @@ func TestFindAllRowsToUpdate(t *testing.T) {
 			nanos:    int64(i),
 			logical:  i,
 		}
-		lines, err := findAllRowsToUpdateDB(db, sink.sinkTableFullName, prev, next)
+		lines, err := findAllRowsToUpdateDB(ctx, conn, sink.sinkTableFullName, prev, next)
 		if err != nil {
 			t.Fatal(err)
 		}

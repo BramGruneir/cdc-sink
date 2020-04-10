@@ -1,14 +1,14 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
 	"strings"
 
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx"
 )
 
 const sinkTableSchema = `
@@ -122,16 +122,18 @@ func parseLine(rawBytes []byte) (Line, error) {
 }
 
 // CreateSinkTable creates if it does not exist, the a table used for sinking.
-func CreateSinkTable(db *sql.DB, sinkTableFullName string) error {
+func CreateSinkTable(ctx context.Context, conn *pgx.Conn, sinkTableFullName string) error {
 	// Needs retry.
-	_, err := db.Exec(fmt.Sprintf(sinkTableSchema, sinkTableFullName))
+	_, err := conn.Exec(ctx, fmt.Sprintf(sinkTableSchema, sinkTableFullName))
 	return err
 }
 
 // WriteToSinkTable upserts a single line to the sink table.
-func (line Line) WriteToSinkTable(db *sql.DB, sinkTableFullName string) error {
+func (line Line) WriteToSinkTable(
+	ctx context.Context, conn *pgx.Conn, sinkTableFullName string,
+) error {
 	// Needs retry.
-	_, err := db.Exec(fmt.Sprintf(sinkTableWrite, sinkTableFullName),
+	_, err := conn.Exec(ctx, fmt.Sprintf(sinkTableWrite, sinkTableFullName),
 		line.nanos, line.logical, line.key, line.after,
 	)
 	return err
@@ -140,9 +142,9 @@ func (line Line) WriteToSinkTable(db *sql.DB, sinkTableFullName string) error {
 // FindAllRowsToUpdate returns all the rows that need to be updated from the
 // sink table.
 func FindAllRowsToUpdate(
-	tx *sql.Tx, sinkTableFullName string, prev ResolvedLine, next ResolvedLine,
+	ctx context.Context, tx pgx.Tx, sinkTableFullName string, prev ResolvedLine, next ResolvedLine,
 ) ([]Line, error) {
-	rows, err := tx.Query(fmt.Sprintf(sinkTableQueryRows, sinkTableFullName),
+	rows, err := tx.Query(ctx, fmt.Sprintf(sinkTableQueryRows, sinkTableFullName),
 		prev.nanos, prev.logical, next.nanos, next.logical,
 	)
 	if err != nil {
@@ -160,8 +162,8 @@ func FindAllRowsToUpdate(
 
 // DeleteLine removes the line from the sinktable.
 // const sinkTableDelete = `DELETE FROM %s WHERE nanos=$1 AND logical=$2 AND key=$3`
-func (line Line) DeleteLine(tx *sql.Tx, sinkTableFullName string) error {
-	_, err := tx.Exec(fmt.Sprintf(sinkTableDelete, sinkTableFullName),
+func (line Line) DeleteLine(ctx context.Context, tx pgx.Tx, sinkTableFullName string) error {
+	_, err := tx.Exec(ctx, fmt.Sprintf(sinkTableDelete, sinkTableFullName),
 		line.nanos, line.logical, line.key,
 	)
 	return err

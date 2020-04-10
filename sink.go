@@ -2,14 +2,14 @@ package main
 
 import (
 	"bufio"
-	"database/sql"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx"
 )
 
 // Sink holds all the info needed for a specific table.
@@ -22,11 +22,11 @@ type Sink struct {
 
 // CreateSink creates all the required tables and returns a new Sink.
 func CreateSink(
-	db *sql.DB, originalTable string, resultDB string, resultTable string,
+	ctx context.Context, conn *pgx.Conn, originalTable string, resultDB string, resultTable string,
 ) (*Sink, error) {
 	// Check to make sure the table exists.
 	resultTableFullName := fmt.Sprintf("%s.%s", resultDB, resultTable)
-	exists, err := TableExists(db, resultDB, resultTable)
+	exists, err := TableExists(ctx, conn, resultDB, resultTable)
 	if err != nil {
 		return nil, err
 	}
@@ -35,11 +35,11 @@ func CreateSink(
 	}
 
 	sinkTableFullName := SinkTableFullName(resultDB, resultTable)
-	if err := CreateSinkTable(db, sinkTableFullName); err != nil {
+	if err := CreateSinkTable(ctx, conn, sinkTableFullName); err != nil {
 		return nil, err
 	}
 
-	columns, err := GetPrimaryKeyColumns(db, resultTableFullName)
+	columns, err := GetPrimaryKeyColumns(ctx, conn, resultTableFullName)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +55,9 @@ func CreateSink(
 }
 
 // HandleRequest is a handler used for this specific sink.
-func (s *Sink) HandleRequest(db *sql.DB, w http.ResponseWriter, r *http.Request) {
+func (s *Sink) HandleRequest(
+	ctx context.Context, conn *pgx.Conn, w http.ResponseWriter, r *http.Request,
+) {
 	scanner := bufio.NewScanner(r.Body)
 	defer r.Body.Close()
 	for scanner.Scan() {
@@ -66,7 +68,7 @@ func (s *Sink) HandleRequest(db *sql.DB, w http.ResponseWriter, r *http.Request)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if err := line.WriteToSinkTable(db, s.sinkTableFullName); err != nil {
+		if err := line.WriteToSinkTable(ctx, conn, s.sinkTableFullName); err != nil {
 			log.Print(err)
 			fmt.Fprint(w, err)
 			w.WriteHeader(http.StatusBadRequest)
@@ -76,7 +78,7 @@ func (s *Sink) HandleRequest(db *sql.DB, w http.ResponseWriter, r *http.Request)
 }
 
 // deleteRow preforms a delete on a single row.
-func (s *Sink) deleteRow(tx *sql.Tx, line Line) error {
+func (s *Sink) deleteRow(ctx context.Context, tx pgx.Tx, line Line) error {
 	// Build the statement.
 	var statement strings.Builder
 	fmt.Fprintf(&statement, "DELETE FROM %s WHERE ", s.resultTableFullName)
@@ -85,17 +87,17 @@ func (s *Sink) deleteRow(tx *sql.Tx, line Line) error {
 			fmt.Fprint(&statement, " AND ")
 		}
 		// Placeholder index always starts at 1.
-		fmt.Fprintf(&statement, "%s = $%d", column, i+1)
+		fmt.Fprintf(&statement, "%s = '%v", column, line.Key[i])
 	}
 	log.Printf("Delete Statement: %s", statement.String())
 
 	// Upsert the line
-	_, err := tx.Exec(statement.String(), line.Key...)
+	_, err := tx.Exec(ctx, statement.String())
 	return err
 }
 
 // upsertRow performs an upsert on a single row.
-func (s *Sink) upsertRow(tx *sql.Tx, line Line) error {
+func (s *Sink) upsertRow(ctx context.Context, tx pgx.Tx, line Line) error {
 	// Parse the after columns
 	if err := json.Unmarshal([]byte(line.after), &(line.After)); err != nil {
 		return err
@@ -127,22 +129,24 @@ func (s *Sink) upsertRow(tx *sql.Tx, line Line) error {
 			fmt.Fprint(&statement, ", ")
 		}
 		// Placeholder index always starts at 1.
-		fmt.Fprintf(&statement, "$%d", i+1)
+		fmt.Fprintf(&statement, "'%v'", values[i])
 	}
 	fmt.Fprint(&statement, ")")
 	log.Printf("Upsert Statement: %s", statement.String())
 
 	// Upsert the line
-	_, err := tx.Exec(statement.String(), values...)
+	_, err := tx.Exec(ctx, statement.String())
 	return err
 }
 
 // UpdateRows updates all changed rows.
-func (s *Sink) UpdateRows(tx *sql.Tx, prev ResolvedLine, next ResolvedLine) error {
+func (s *Sink) UpdateRows(
+	ctx context.Context, tx pgx.Tx, prev ResolvedLine, next ResolvedLine,
+) error {
 	log.Printf("Updating Sink %s", s.resultTableFullName)
 
 	// First, gather all the rows to update.
-	lines, err := FindAllRowsToUpdate(tx, s.sinkTableFullName, prev, next)
+	lines, err := FindAllRowsToUpdate(ctx, tx, s.sinkTableFullName, prev, next)
 	if err != nil {
 		return err
 	}
@@ -168,20 +172,20 @@ func (s *Sink) UpdateRows(tx *sql.Tx, prev ResolvedLine, next ResolvedLine) erro
 
 		// Is this a delete?
 		if line.after == "null" {
-			if err := s.deleteRow(tx, line); err != nil {
+			if err := s.deleteRow(ctx, tx, line); err != nil {
 				return err
 			}
-			if err := line.DeleteLine(tx, s.sinkTableFullName); err != nil {
+			if err := line.DeleteLine(ctx, tx, s.sinkTableFullName); err != nil {
 				return err
 			}
 			continue
 		}
 
 		// This can be an upsert statement.
-		if err := s.upsertRow(tx, line); err != nil {
+		if err := s.upsertRow(ctx, tx, line); err != nil {
 			return err
 		}
-		if err := line.DeleteLine(tx, s.sinkTableFullName); err != nil {
+		if err := line.DeleteLine(ctx, tx, s.sinkTableFullName); err != nil {
 			return err
 		}
 	}

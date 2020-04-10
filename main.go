@@ -1,13 +1,13 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx"
 )
 
 var connectionString = flag.String("conn", "postgresql://root@localhost:26257/defaultdb?sslmode=disable", "cockroach connection string")
@@ -22,8 +22,9 @@ var sinkDB = flag.String("sink_db", "_CDC_SINK", "db for storing temp sink table
 
 var dropDB = flag.Bool("drop", false, "Drop the sink db before starting?")
 
-func createHandler(db *sql.DB, sinks *Sinks) func(http.ResponseWriter, *http.Request) {
+func createHandler(conn *pgx.Conn, sinks *Sinks) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		log.Printf("Request: %s", r.RequestURI)
 		log.Printf("Header: %s", r.Header)
 
@@ -33,7 +34,7 @@ func createHandler(db *sql.DB, sinks *Sinks) func(http.ResponseWriter, *http.Req
 			sink := sinks.FindSink(ndjson.topic)
 			if sink != nil {
 				log.Printf("Found Sink: %s", sink.originalTableName)
-				sink.HandleRequest(db, w, r)
+				sink.HandleRequest(ctx, conn, w, r)
 				return
 			}
 
@@ -46,7 +47,7 @@ func createHandler(db *sql.DB, sinks *Sinks) func(http.ResponseWriter, *http.Req
 		// Is it a resolved url?
 		resolved, resolvedErr := parseResolvedURL(r.RequestURI)
 		if resolvedErr == nil {
-			sinks.HandleResolvedRequest(db, resolved, w, r)
+			sinks.HandleResolvedRequest(ctx, conn, resolved, w, r)
 			return
 		}
 
@@ -60,30 +61,31 @@ func createHandler(db *sql.DB, sinks *Sinks) func(http.ResponseWriter, *http.Req
 }
 
 func main() {
-	db, err := sql.Open("postgres", *connectionString)
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, *connectionString)
 	if err != nil {
 		log.Fatal("error connecting to the database: ", err)
 	}
-	defer db.Close()
+	defer conn.Close(context.Background())
 
 	if *dropDB {
-		if err := DropSinkDB(db); err != nil {
+		if err := DropSinkDB(ctx, conn); err != nil {
 			log.Fatal(err)
 		}
 	}
 
-	if err := CreateSinkDB(db); err != nil {
+	if err := CreateSinkDB(ctx, conn); err != nil {
 		log.Fatal(err)
 	}
 
 	sinks := CreateSinks()
 
 	// Add all the sinks here
-	if err := sinks.AddSink(db, *sourceTable, *resultDB, *resultTable); err != nil {
+	if err := sinks.AddSink(ctx, conn, *sourceTable, *resultDB, *resultTable); err != nil {
 		log.Fatal(err)
 	}
 
-	handler := createHandler(db, sinks)
+	handler := createHandler(conn, sinks)
 	http.HandleFunc("/", handler)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 }

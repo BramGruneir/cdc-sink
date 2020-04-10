@@ -1,35 +1,41 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"testing"
+
+	"github.com/jackc/pgx"
 )
 
 // These test require an insecure cockroach server is running on the default
 // port with the default root user with no password.
 
-func (rl ResolvedLine) writeUpdatedDB(db *sql.DB) error {
-	tx, err := db.Begin()
+func (rl ResolvedLine) writeUpdatedDB(ctx context.Context, conn *pgx.Conn) error {
+	tx, err := conn.Begin(ctx)
+	defer tx.Rollback(ctx)
 	if err != nil {
 		return err
 	}
-	if err := rl.writeUpdated(tx); err != nil {
+	if err := rl.writeUpdated(ctx, tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return tx.Commit(ctx)
 }
 
-func getPreviousResolvedDB(db *sql.DB, endpoint string) (ResolvedLine, error) {
-	tx, err := db.Begin()
+func getPreviousResolvedDB(
+	ctx context.Context, conn *pgx.Conn, endpoint string,
+) (ResolvedLine, error) {
+	tx, err := conn.Begin(ctx)
+	defer tx.Rollback(ctx)
 	if err != nil {
 		return ResolvedLine{}, err
 	}
-	resolvedLine, err := getPreviousResolved(tx, endpoint)
+	resolvedLine, err := getPreviousResolved(ctx, tx, endpoint)
 	if err != nil {
 		return ResolvedLine{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return ResolvedLine{}, err
 	}
 	return resolvedLine, nil
@@ -85,14 +91,15 @@ func TestParseResolvedLine(t *testing.T) {
 
 func TestResolvedTable(t *testing.T) {
 	// Create the test db
-	db, _, dbClose := getDB(t)
+	ctx := context.Background()
+	conn, _, dbClose := getDB(ctx, t)
 	defer dbClose()
 
 	// Create a new _cdc_sink db
-	createSinkDB(t, db)
-	defer dropSinkDB(t, db)
+	createSinkDB(ctx, t, conn)
+	defer dropSinkDB(ctx, t, conn)
 
-	if err := CreateResolvedTable(db); err != nil {
+	if err := CreateResolvedTable(ctx, conn); err != nil {
 		t.Fatal(err)
 	}
 
@@ -109,12 +116,12 @@ func TestResolvedTable(t *testing.T) {
 	}
 
 	// Make sure there are no rows in the table yet.
-	if rowCount := getRowCount(t, db, resolvedFullTableName()); rowCount != 0 {
+	if rowCount := getRowCount(ctx, t, conn, resolvedFullTableName()); rowCount != 0 {
 		t.Fatalf("Expected 0 rows, got %d", rowCount)
 	}
 
 	// Find no previous value for endpoint "one".
-	one, err := getPreviousResolvedDB(db, "one")
+	one, err := getPreviousResolvedDB(ctx, conn, "one")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,10 +134,10 @@ func TestResolvedTable(t *testing.T) {
 			nanos:    int64(i),
 			logical:  i,
 		}
-		if err := newOne.writeUpdatedDB(db); err != nil {
+		if err := newOne.writeUpdatedDB(ctx, conn); err != nil {
 			t.Fatal(err)
 		}
-		previousOne, err := getPreviousResolvedDB(db, "one")
+		previousOne, err := getPreviousResolvedDB(ctx, conn, "one")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -138,7 +145,7 @@ func TestResolvedTable(t *testing.T) {
 	}
 
 	// Now do the same for a second endpoint.
-	two, err := getPreviousResolvedDB(db, "two")
+	two, err := getPreviousResolvedDB(ctx, conn, "two")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,10 +158,10 @@ func TestResolvedTable(t *testing.T) {
 			nanos:    int64(i),
 			logical:  i,
 		}
-		if err := newOne.writeUpdatedDB(db); err != nil {
+		if err := newOne.writeUpdatedDB(ctx, conn); err != nil {
 			t.Fatal(err)
 		}
-		previousOne, err := getPreviousResolvedDB(db, "two")
+		previousOne, err := getPreviousResolvedDB(ctx, conn, "two")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -173,10 +180,10 @@ func TestResolvedTable(t *testing.T) {
 			newResolved.endpoint = "two"
 		}
 
-		if err := newResolved.writeUpdatedDB(db); err != nil {
+		if err := newResolved.writeUpdatedDB(ctx, conn); err != nil {
 			t.Fatal(err)
 		}
-		previousResolved, err := getPreviousResolvedDB(db, newResolved.endpoint)
+		previousResolved, err := getPreviousResolvedDB(ctx, conn, newResolved.endpoint)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -185,7 +192,7 @@ func TestResolvedTable(t *testing.T) {
 
 	// Finally, check to make sure that there are only 2 lines in the resolved
 	// table.
-	if rowCount := getRowCount(t, db, resolvedFullTableName()); rowCount != 2 {
+	if rowCount := getRowCount(ctx, t, conn, resolvedFullTableName()); rowCount != 2 {
 		t.Fatalf("Expected 2 rows, got %d", rowCount)
 	}
 }

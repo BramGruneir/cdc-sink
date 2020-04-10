@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	_ "github.com/lib/pq"
 )
 
 // This is the timestamp format:  YYYYMMDDHHMMSSNNNNNNNNNLLLLLLLLLL

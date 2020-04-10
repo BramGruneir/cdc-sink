@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"testing"
@@ -11,7 +12,8 @@ import (
 
 func TestGetPrimaryKeyColumns(t *testing.T) {
 	// Create the test db
-	db, dbName, dbClose := getDB(t)
+	ctx := context.Background()
+	conn, dbName, dbClose := getDB(ctx, t)
 	defer dbClose()
 
 	testcases := []struct {
@@ -43,12 +45,12 @@ func TestGetPrimaryKeyColumns(t *testing.T) {
 	for i, test := range testcases {
 		t.Run(fmt.Sprintf("%d:%s", i, test.tableSchema), func(t *testing.T) {
 			tableFullName := fmt.Sprintf("%s.test_%d", dbName, i)
-			if _, err := db.Exec(
+			if _, err := conn.Exec(ctx,
 				fmt.Sprintf(`CREATE TABLE %s ( %s )`, tableFullName, test.tableSchema),
 			); err != nil {
 				t.Fatal(err)
 			}
-			columns, err := GetPrimaryKeyColumns(db, tableFullName)
+			columns, err := GetPrimaryKeyColumns(ctx, conn, tableFullName)
 			if err != nil {
 				t.Fatal(err)
 			}
